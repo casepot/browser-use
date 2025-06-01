@@ -5,5 +5,6 @@ Browser = BrowserSession
 BrowserConfig = BrowserProfile
 BrowserContext = BrowserSession
 BrowserContextConfig = BrowserProfile
+BrowserContextState = BrowserSession  # Alias for compatibility
 
-__all__ = ['Browser', 'BrowserConfig', 'BrowserContext', 'BrowserContextConfig']
+__all__ = ['Browser', 'BrowserConfig', 'BrowserContext', 'BrowserContextConfig', 'BrowserContextState']

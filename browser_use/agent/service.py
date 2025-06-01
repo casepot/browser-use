@@ -51,8 +51,8 @@ from browser_use.browser.context import BrowserContext
 from browser_use.browser.views import BrowserState, BrowserStateHistory
 from browser_use.controller.registry.views import ActionModel
 from browser_use.controller.service import Controller
-from browser_use.dom.history_tree_processor.service import HistoryTreeProcessor, DOMElementNode
-from browser_use.dom.history_tree_processor.view import DOMHistoryElement # Correct import
+from browser_use.dom.history_tree_processor.service import DOMElementNode, HistoryTreeProcessor
+from browser_use.dom.history_tree_processor.view import DOMHistoryElement  # Correct import
 from browser_use.exceptions import LLMException
 from browser_use.telemetry.service import ProductTelemetry
 from browser_use.telemetry.views import (
