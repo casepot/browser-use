@@ -22,6 +22,7 @@ from langchain_core.messages import (
 # from lmnr.sdk.decorators import observe
 from pydantic import BaseModel, ValidationError
 
+from browser_use.agent.action_executor import MultiActionExecutor
 from browser_use.agent.gif import create_history_gif
 from browser_use.agent.memory.service import Memory
 from browser_use.agent.memory.views import MemoryConfig
@@ -1114,230 +1115,26 @@ class Agent(Generic[Context]):
 
 				create_history_gif(task=self.task, history=self.state.history, output_path=output_path)
 
-	def _get_effective_label(self, node: DOMElementNode | None) -> str:
-		"""Extracts a displayable label or text from a DOMElementNode."""
-		if not node:
-			return "None"
-		
-		# Prioritize aria-label
-		label = node.attributes.get('aria-label', '').strip()
-		if label:
-			return label
-		
-		# Fallback to specific known attributes for buttons or inputs
-		button_text = node.attributes.get('value', '').strip() # For <input type="button" value="Search">
-		if node.tag_name == 'button' and button_text: # Less common for actual <button> tags but possible
-			return button_text
-		if node.tag_name == 'input' and node.attributes.get('type') in ['button', 'submit', 'reset'] and button_text:
-			return button_text
 
-		# Fallback to text_content, possibly truncated for brevity
-		text = node.get_all_text_till_next_clickable_element()
-		if text:
-			# Limit length and clean up whitespace
-			return " ".join(text.strip().split())[:70]
-		
-		# Further fallback for elements like <img> with alt text
-		alt_text = node.attributes.get('alt', '').strip()
-		if alt_text:
-			return f"Image (alt: {alt_text})"
-
-		return "N/A"
-
-	# @observe(name='controller.multi_act')
 	@time_execution_async('--multi-act (agent)')
 	async def multi_act(
 		self,
 		actions: list[ActionModel],
 		check_for_new_elements: bool = True,
 	) -> list[ActionResult]:
-		"""Execute multiple actions"""
-		results = []
-
-		# These are based on the state *before* any actions in this multi_act sequence begin.
-		initial_cached_selector_map = await self.browser_context.get_selector_map()
-		initial_cached_path_hashes = {e.hash.branch_path_hash for e in initial_cached_selector_map.values()}
-
-		# This will be updated within the loop if re-perception occurs,
-		# representing the selector map that was valid for the *previous* action's execution or relocation.
-		current_iteration_baseline_selector_map = initial_cached_selector_map
-
-		await self.browser_context.remove_highlights()
-
-		for i, action_model in enumerate(actions):
-			action_to_execute = action_model # This might be replaced if index changes
-
-			if action_model.get_index() is not None and i != 0:
-				# Re-perceive state *before* executing current indexed action (if not the first action)
-				new_state = await self.browser_context.get_state(cache_clickable_elements_hashes=False)
-				new_selector_map = new_state.selector_map
-				new_element_tree = new_state.element_tree # Needed for find_history_element_in_tree
-
-				original_intended_node = current_iteration_baseline_selector_map.get(action_model.get_index())
-				current_node_at_old_index = new_selector_map.get(action_model.get_index())
-
-				original_intended_full_hash = original_intended_node.hash if original_intended_node else None
-				current_full_hash_at_old_index = current_node_at_old_index.hash if current_node_at_old_index else None
-				
-				action_ready_to_execute = False
-				if original_intended_full_hash == current_full_hash_at_old_index and original_intended_full_hash is not None:
-					# Element at the original index appears to be the same one intended.
-					action_ready_to_execute = True
-				elif original_intended_node: # Hashes differ, or current_node_at_old_index is None. Attempt relocation.
-					logger.info(
-						f"Element at index {action_model.get_index()} (path: {original_intended_node.xpath}, hash: {original_intended_full_hash}) "
-						f"appears to have changed or disappeared. Current element at index: {current_node_at_old_index} (hash: {current_full_hash_at_old_index}). Attempting relocation."
-					)
-					
-					history_element_to_find = HistoryTreeProcessor.convert_dom_element_to_history_element(original_intended_node)
-					relocated_node = HistoryTreeProcessor.find_history_element_in_tree(history_element_to_find, new_element_tree)
-
-					if relocated_node and relocated_node.highlight_index is not None:
-						logger.info(
-							f"Successfully relocated element by FULL HASH: original index {action_model.get_index()} -> new index {relocated_node.highlight_index} "
-							f"(path: {relocated_node.xpath}, hash: {relocated_node.hash})."
-						)
-						action_dict = action_model.model_dump(exclude_unset=True)
-						action_name = list(action_dict.keys())[0]
-						action_params = action_dict[action_name]
-						action_params['index'] = relocated_node.highlight_index
-						action_to_execute = self.ActionModel(**{action_name: action_params})
-						action_ready_to_execute = True
-					else:
-						# Full hash relocation failed, attempt SEMANTIC relocation
-						logger.info(
-							f"Full hash relocation failed for element originally at index {action_model.get_index()} "
-							f"(path: {original_intended_node.xpath}, original_hash: {original_intended_full_hash}). "
-							f"Attempting semantic relocation based on structure and label."
-						)
-						original_label = self._get_effective_label(original_intended_node)
-						semantically_relocated_node = None
-
-						if original_label and original_label != "N/A": # Only attempt if original had a decent label
-							for candidate_node in new_selector_map.values(): # Iterate through all elements in the new DOM
-								if candidate_node.hash.branch_path_hash == original_intended_node.hash.branch_path_hash and \
-								   candidate_node.hash.xpath_hash == original_intended_node.hash.xpath_hash and \
-								   self._get_effective_label(candidate_node) == original_label:
-									semantically_relocated_node = candidate_node
-									break
-						
-						if semantically_relocated_node and semantically_relocated_node.highlight_index is not None:
-							logger.info(
-								f"Successfully relocated element SEMANTICALLY: original index {action_model.get_index()} -> "
-								f"new index {semantically_relocated_node.highlight_index} "
-								f"(path: {semantically_relocated_node.xpath}, new_hash: {semantically_relocated_node.hash}). "
-								f"Matched on structural position and label: '{original_label}'."
-							)
-							action_dict = action_model.model_dump(exclude_unset=True)
-							action_name = list(action_dict.keys())[0]
-							action_params = action_dict[action_name]
-							action_params['index'] = semantically_relocated_node.highlight_index
-							action_to_execute = self.ActionModel(**{action_name: action_params})
-							action_ready_to_execute = True
-						else:
-							# Both full hash and semantic relocation failed.
-							# The action_ready_to_execute flag will remain False, leading to the detailed error below.
-							pass # Fall through to the 'if not action_ready_to_execute:' block
-				
-				# If action is still not ready after all relocation attempts, log detailed error and break.
-				if not action_ready_to_execute:
-					if original_intended_node: # Ensure original_intended_node exists before trying to use it in the message
-						msg = (
-							f"Element at index {action_model.get_index()} (path: {original_intended_node.xpath}) changed/disappeared and could not be relocated "
-							f"by its original full hash ({original_intended_full_hash}) or by semantic matching."
-						)
-						if current_node_at_old_index:
-							msg += (
-								f" An element with a new full hash ({current_node_at_old_index.hash}) "
-								f"is now at the original index {action_model.get_index()} "
-								f"(label/text: '{self._get_effective_label(current_node_at_old_index)}')."
-							)
-							if current_node_at_old_index.hash.branch_path_hash == original_intended_node.hash.branch_path_hash and \
-							   current_node_at_old_index.hash.xpath_hash == original_intended_node.hash.xpath_hash:
-								msg += (
-									f" This new element is structurally in the same DOM position (same branch and xpath hash) "
-									f"but its attributes or label may have changed (original attributes hash: {original_intended_node.hash.attributes_hash}, "
-									f"new attributes hash: {current_node_at_old_index.hash.attributes_hash}; "
-									f"original label: '{self._get_effective_label(original_intended_node)}')."
-								)
-						else:
-							msg += f" No element is currently present at the original index {action_model.get_index()} in the new page state."
-					else: # original_intended_node was None
-						msg = f"Original element for index {action_model.get_index()} was unexpectedly None in the baseline selector map."
-					
-					msg += " Aborting action sequence."
-					logger.warning(msg)
-					results.append(ActionResult(error=msg, extracted_content=msg, include_in_memory=True))
-					break
-				
-				# Update the baseline selector map for the *next* iteration's checks
-				current_iteration_baseline_selector_map = new_selector_map
-				# If we successfully relocated and are ready to execute the current action,
-				# we will proceed with it. The global stability check is deferred or will only
-				# influence the decision to continue with *further subsequent* actions.
-			
-			# Execute the action (either original or relocated)
-			try:
-				await self._raise_if_stopped_or_paused()
-
-				# Execute the action (either original or relocated)
-				result = await self.controller.act(
-					action_to_execute, # Use action_to_execute which may have an updated index
-					self.browser_context,
-					self.settings.page_extraction_llm, # Pass correct LLM
-					self.sensitive_data,
-					self.settings.available_file_paths,
-					context=self.context,
-				)
-				results.append(result)
-				logger.debug(f'Executed action {i + 1} / {len(actions)}')
-
-				# If current action is done or errored, break the sequence.
-				if results[-1].is_done or results[-1].error:
-					break
-
-				# If this was the last action in the list, break.
-				if i == len(actions) - 1:
-					break
-
-				# Global Stability Check:
-				# If not the last action, and current action was successful,
-				# check for unexpected global page changes before proceeding to the next action.
-				if check_for_new_elements:
-					# Re-perceive the page *after* the action to see its effects for global stability check
-					new_state_after_action = await self.browser_context.get_state(cache_clickable_elements_hashes=False)
-					current_path_hashes_for_global_check = {
-						e.hash.branch_path_hash for e in new_state_after_action.selector_map.values()
-					}
-					# Compare against the very initial state of the page before any multi_act actions
-					newly_appeared_hashes = current_path_hashes_for_global_check - initial_cached_path_hashes
-
-					if len(newly_appeared_hashes) > self.settings.unexpected_elements_threshold:
-						action_name_for_log = list(action_to_execute.model_dump(exclude_unset=True).keys())[0]
-						warning_msg = (
-							f"Warning: Global page instability detected. {len(newly_appeared_hashes)} new unexpected elements "
-							f"(based on branch_path_hash) appeared on the page after action {i+1} ({action_name_for_log}), "
-							f'exceeding threshold of {self.settings.unexpected_elements_threshold}. '
-							f'New hashes: {list(newly_appeared_hashes)[:10]}. '
-							f"Aborting subsequent actions in the sequence."
-						)
-						logger.warning(warning_msg)
-						# Add a non-fatal warning to results for LLM awareness
-						results.append(ActionResult(extracted_content=warning_msg, include_in_memory=True))
-						break # Abort *subsequent* actions
-
-				# If all checks passed and we are not breaking, sleep before the next action.
-				await asyncio.sleep(self.browser_context.browser_profile.wait_between_actions)
-
-			except asyncio.CancelledError:
-				# Gracefully handle task cancellation
-				logger.info(f'Action {i + 1} was cancelled due to Ctrl+C')
-				if not results:
-					# Add a result for the cancelled action
-					results.append(ActionResult(error='The action was cancelled due to Ctrl+C', include_in_memory=True))
-				raise InterruptedError('Action cancelled by user')
-
-		return results
+		"""Execute multiple actions using MultiActionExecutor"""
+		executor = MultiActionExecutor(
+			browser_session=self.browser_context,
+			controller=self.controller,
+			action_model_class=self.ActionModel,
+			page_extraction_llm=self.settings.page_extraction_llm,
+			sensitive_data=self.sensitive_data,
+			available_file_paths=self.settings.available_file_paths,
+			generic_controller_context=self.context,
+			unexpected_elements_threshold=self.settings.unexpected_elements_threshold,
+			wait_between_actions=self.browser_context.browser_profile.wait_between_actions
+		)
+		return await executor.execute(actions, check_for_new_elements)
 
 	async def _validate_output(self) -> bool:
 		"""Validate the output of the last action is what the user wanted"""
