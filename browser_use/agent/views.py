@@ -68,6 +68,7 @@ class AgentSettings(BaseModel):
 	tool_calling_method: ToolCallingMethod | None = 'auto'
 	page_extraction_llm: BaseChatModel | None = None
 	planner_llm: BaseChatModel | None = None
+	done_llm: BaseChatModel | None = None # LLM for the final 'done' action and summarization
 	planner_interval: int = 1  # Run planner every N steps
 	is_planner_reasoning: bool = False  # type: ignore
 	extend_planner_system_message: str | None = None

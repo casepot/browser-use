@@ -143,6 +143,7 @@ class Agent(Generic[Context]):
 		tool_calling_method: ToolCallingMethod | None = 'auto',
 		page_extraction_llm: BaseChatModel | None = None,
 		planner_llm: BaseChatModel | None = None,
+		done_llm: BaseChatModel | None = None, # Added for separate done LLM
 		planner_interval: int = 1,  # Run planner every N steps
 		is_planner_reasoning: bool = False,
 		extend_planner_system_message: str | None = None,
@@ -187,6 +188,7 @@ class Agent(Generic[Context]):
 			tool_calling_method=tool_calling_method,
 			page_extraction_llm=page_extraction_llm,
 			planner_llm=planner_llm,
+			done_llm=done_llm,
 			planner_interval=planner_interval,
 			is_planner_reasoning=is_planner_reasoning,
 			save_playwright_script_path=save_playwright_script_path,
@@ -206,7 +208,8 @@ class Agent(Generic[Context]):
 		self.initial_actions = self._convert_initial_actions(initial_actions) if initial_actions else None
 
 		# Model setup
-		self._set_model_names()
+		self._set_model_names() # This will set self.model_name, self.planner_model_name
+		self._set_done_model_name() # Add this call
 		self.tool_calling_method = self._set_tool_calling_method()
 
 		# Handle users trying to use use_vision=True with DeepSeek models
@@ -261,7 +264,8 @@ class Agent(Generic[Context]):
 			f'planner_model={self.planner_model_name}'
 			f'{" +reasoning" if self.settings.is_planner_reasoning else ""}'
 			f'{" +vision" if self.settings.use_vision_for_planner else ""}, '
-			f'extraction_model={page_extraction_model_name_for_log_info} ' # Use the carefully obtained one
+			f'extraction_model={page_extraction_model_name_for_log_info}, '
+			f'done_model={self.done_model_name if self.done_model_name else "Default"}'
 		)
 
 		# Verify we can connect to the LLM
@@ -413,6 +417,18 @@ class Agent(Generic[Context]):
 		else:
 			self.planner_model_name = None
 
+	def _set_done_model_name(self) -> None:
+		self.done_model_name = 'Unknown'
+		if self.settings.done_llm:
+			if hasattr(self.settings.done_llm, 'model_name'):
+				model = self.settings.done_llm.model_name  # type: ignore
+				self.done_model_name = model if model is not None else 'Unknown'
+			elif hasattr(self.settings.done_llm, 'model'):
+				model = self.settings.done_llm.model  # type: ignore
+				self.done_model_name = model if model is not None else 'Unknown'
+		else:
+			self.done_model_name = None # Explicitly None if no done_llm is set
+
 	def _setup_action_models(self) -> None:
 		"""Setup dynamic action models from controller's registry"""
 		# Initially only include actions with no filters
@@ -531,7 +547,18 @@ class Agent(Generic[Context]):
 			tokens = self._message_manager.state.history.current_tokens
 
 			try:
-				model_output = await self.get_next_action(input_messages)
+				# Determine which LLM to use for this step
+				llm_for_step = self.llm
+				is_final_step_for_done_action = step_info and step_info.is_last_step()
+
+				if is_final_step_for_done_action and self.settings.done_llm:
+					llm_for_step = self.settings.done_llm
+					logger.info(f"Using dedicated 'done_llm' ({self.done_model_name}) for the final step.")
+				elif is_final_step_for_done_action:
+					logger.info(f"Using main LLM ({self.model_name}) for the final step (no dedicated 'done_llm' configured).")
+
+
+				model_output = await self.get_next_action(input_messages, llm_override=llm_for_step)
 				if (
 					not model_output.action
 					or not isinstance(model_output.action, list)
@@ -544,7 +571,8 @@ class Agent(Generic[Context]):
 					)
 
 					retry_messages = input_messages + [clarification_message]
-					model_output = await self.get_next_action(retry_messages)
+					# Use the same llm_for_step for retry
+					model_output = await self.get_next_action(retry_messages, llm_override=llm_for_step)
 
 					if not model_output.action or all(action.model_dump() == {} for action in model_output.action):
 						logger.warning('Model still returned empty after retry. Inserting safe noop action.')
@@ -711,22 +739,50 @@ class Agent(Generic[Context]):
 		text = re.sub(self.STRAY_CLOSE_TAG, '', text)
 		return text.strip()
 
-	def _convert_input_messages(self, input_messages: list[BaseMessage]) -> list[BaseMessage]:
-		"""Convert input messages to the correct format"""
-		if is_model_without_tool_support(self.model_name):
-			return convert_input_messages(input_messages, self.model_name)
+	def _convert_input_messages(self, input_messages: list[BaseMessage], model_name_override: str | None = None) -> list[BaseMessage]:
+		"""Convert input messages to the correct format, allowing model name override."""
+		model_to_check = model_name_override or self.model_name
+		if is_model_without_tool_support(model_to_check):
+			return convert_input_messages(input_messages, model_to_check)
 		else:
 			return input_messages
 
 	@time_execution_async('--get_next_action (agent)')
-	async def get_next_action(self, input_messages: list[BaseMessage]) -> AgentOutput:
-		"""Get next action from LLM based on current state"""
-		input_messages = self._convert_input_messages(input_messages)
+	async def get_next_action(self, input_messages: list[BaseMessage], llm_override: BaseChatModel | None = None) -> AgentOutput:
+		"""Get next action from LLM based on current state.
+		   llm_override can be used to specify a different LLM for this specific call (e.g., for the 'done' action).
+		"""
+		current_llm = llm_override or self.llm
+		model_name_for_conversion = self.model_name # Default
+
+		if llm_override:
+			# Try to get name directly from the override
+			llm_override_name_attr = getattr(llm_override, "model_name", None)
+			llm_override_model_attr = getattr(llm_override, "model", None)
+
+			specific_override_name = None
+			if llm_override_name_attr and llm_override_name_attr != "Unknown":
+				specific_override_name = llm_override_name_attr
+			elif llm_override_model_attr and llm_override_model_attr != "Unknown":
+				specific_override_name = llm_override_model_attr
+			
+			if specific_override_name:
+				model_name_for_conversion = specific_override_name
+			else:
+				# If direct name extraction fails, check if it's one of the configured special LLMs
+				if llm_override == self.settings.done_llm and self.done_model_name and self.done_model_name != "Unknown":
+					model_name_for_conversion = self.done_model_name
+				elif llm_override == self.settings.planner_llm and self.planner_model_name and self.planner_model_name != "Unknown":
+					model_name_for_conversion = self.planner_model_name
+				# Note: page_extraction_llm is typically not passed as an override to get_next_action,
+				# as its usage is more direct in controller.act. If it were, similar logic would apply.
+
+		input_messages = self._convert_input_messages(input_messages, model_name_override=model_name_for_conversion)
 
 		if self.tool_calling_method == 'raw':
 			logger.debug(f'Using {self.tool_calling_method} for {self.chat_model_library}')
 			try:
-				output = self.llm.invoke(input_messages)
+				output = current_llm.invoke(input_messages)
 				response = {'raw': output, 'parsed': None}
 			except Exception as e:
 				logger.error(f'Failed to invoke model: {str(e)}')
@@ -742,7 +798,7 @@ class Agent(Generic[Context]):
 				raise ValueError('Could not parse response.')
 
 		elif self.tool_calling_method is None:
-			structured_llm = self.llm.with_structured_output(self.AgentOutput, include_raw=True)
+			structured_llm = current_llm.with_structured_output(self.AgentOutput, include_raw=True)
 			try:
 				response: dict[str, Any] = await structured_llm.ainvoke(input_messages)  # type: ignore
 				parsed: AgentOutput | None = response['parsed']
@@ -753,7 +809,7 @@ class Agent(Generic[Context]):
 
 		else:
 			logger.debug(f'Using {self.tool_calling_method} for {self.chat_model_library}')
-			structured_llm = self.llm.with_structured_output(self.AgentOutput, include_raw=True, method=self.tool_calling_method)
+			structured_llm = current_llm.with_structured_output(self.AgentOutput, include_raw=True, method=self.tool_calling_method)
 			response: dict[str, Any] = await structured_llm.ainvoke(input_messages)  # type: ignore
 
 		# Handle tool call responses
@@ -1046,7 +1102,7 @@ class Agent(Generic[Context]):
 			return button_text
 
 		# Fallback to text_content, possibly truncated for brevity
-		text = node.text_content
+		text = node.get_all_text_till_next_clickable_element()
 		if text:
 			# Limit length and clean up whitespace
 			return " ".join(text.strip().split())[:70]
