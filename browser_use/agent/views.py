@@ -63,6 +63,7 @@ class AgentSettings(BaseModel):
 		'aria-expanded',
 	]
 	max_actions_per_step: int = 10
+	unexpected_elements_threshold: int = 10
 
 	tool_calling_method: ToolCallingMethod | None = 'auto'
 	page_extraction_llm: BaseChatModel | None = None
