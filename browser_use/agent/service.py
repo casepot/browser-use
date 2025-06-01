@@ -547,32 +547,62 @@ class Agent(Generic[Context]):
 			tokens = self._message_manager.state.history.current_tokens
 
 			try:
-				# Determine which LLM to use for this step
-				llm_for_step = self.llm
-				is_final_step_for_done_action = step_info and step_info.is_last_step()
+				# Initial model call, typically with self.llm
+				# The llm_override in get_next_action will handle if planner_llm should be used by planner itself.
+				# For a normal step, llm_for_step would be self.llm initially.
+				initial_llm_for_step = self.llm # Default to main LLM for the first pass
 
-				if is_final_step_for_done_action and self.settings.done_llm:
-					llm_for_step = self.settings.done_llm
-					logger.info(f"Using dedicated 'done_llm' ({self.done_model_name}) for the final step.")
-				elif is_final_step_for_done_action:
-					logger.info(f"Using main LLM ({self.model_name}) for the final step (no dedicated 'done_llm' configured).")
+				model_output = await self.get_next_action(input_messages, llm_override=initial_llm_for_step)
+
+				# Check if the chosen action is 'done' and if a specific done_llm is configured
+				is_done_action_chosen = False
+				if model_output.action and isinstance(model_output.action, list) and len(model_output.action) == 1:
+					# Assuming 'done' action is singular if chosen.
+					# Need a reliable way to check if the action is 'done'.
+					# This might involve checking the action name if ActionModel has a 'name' field or similar.
+					# For now, let's assume the first action's name can be checked.
+					action_details = model_output.action[0].model_dump()
+					if 'done' in action_details:
+						is_done_action_chosen = True
+
+				is_final_step_due_to_max_steps = step_info and step_info.is_last_step()
+
+				# If 'done' is chosen OR it's the final step, and done_llm is set, potentially re-invoke with done_llm
+				if (is_done_action_chosen or is_final_step_due_to_max_steps) and self.settings.done_llm:
+					if initial_llm_for_step != self.settings.done_llm: # Avoid re-invoking if done_llm was already used
+						logger.info(f"Action is 'done' or it's the final step. Re-invoking with dedicated 'done_llm' ({self.done_model_name}).")
+						# The special "last step" message is added before get_messages(), so it will be included.
+						# If it's an agent-chosen "done" before max_steps, that message won't be there, which is fine.
+						model_output = await self.get_next_action(input_messages, llm_override=self.settings.done_llm)
+					elif is_done_action_chosen:
+						logger.info(f"Action is 'done', and dedicated 'done_llm' ({self.done_model_name}) was already used for the initial call.")
+					elif is_final_step_due_to_max_steps:
+						logger.info(f"Final step, and dedicated 'done_llm' ({self.done_model_name}) was already used for the initial call.")
+
+				elif is_done_action_chosen: # Done action chosen, but no specific done_llm
+						logger.info(f"Action is 'done'. Using main LLM ({self.model_name}) as no dedicated 'done_llm' is configured.")
+				elif is_final_step_due_to_max_steps: # Final step, but no specific done_llm
+						logger.info(f"Final step. Using main LLM ({self.model_name}) as no dedicated 'done_llm' is configured.")
 
 
-				model_output = await self.get_next_action(input_messages, llm_override=llm_for_step)
+				# Retry logic if action is empty (applies to the potentially re-invoked model_output)
 				if (
 					not model_output.action
 					or not isinstance(model_output.action, list)
 					or all(action.model_dump() == {} for action in model_output.action)
 				):
 					logger.warning('Model returned empty action. Retrying...')
-
 					clarification_message = HumanMessage(
 						content='You forgot to return an action. Please respond only with a valid JSON action according to the expected format.'
 					)
-
 					retry_messages = input_messages + [clarification_message]
-					# Use the same llm_for_step for retry
-					model_output = await self.get_next_action(retry_messages, llm_override=llm_for_step)
+					
+					# Determine LLM for retry: if done_llm was used for the failed call, use it again.
+					llm_for_retry = self.llm # Default
+					if (is_done_action_chosen or is_final_step_due_to_max_steps) and self.settings.done_llm:
+						llm_for_retry = self.settings.done_llm
+					
+					model_output = await self.get_next_action(retry_messages, llm_override=llm_for_retry)
 
 					if not model_output.action or all(action.model_dump() == {} for action in model_output.action):
 						logger.warning('Model still returned empty after retry. Inserting safe noop action.')
