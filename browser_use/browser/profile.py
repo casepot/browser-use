@@ -620,9 +620,11 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 	def copy_old_config_names_to_new(self) -> Self:
 		"""Copy old config window_width & window_height to window_size."""
 		if self.window_width or self.window_height:
-			self.window_size = self.window_size or {}
-			self.window_size['width'] = (self.window_size or {}).get('width') or self.window_width or 1280
-			self.window_size['height'] = (self.window_size or {}).get('height') or self.window_height or 1100
+			# Create a proper ViewportSize dict instead of regular dict
+			width = self.window_width or 1280
+			height = self.window_height or 1100
+			# Use object.__setattr__ to bypass Pydantic validation and avoid recursion
+			object.__setattr__(self, 'window_size', ViewportSize(width=int(width), height=int(height)))
 		return self
 
 	@model_validator(mode='after')
