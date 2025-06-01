@@ -25,7 +25,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, InstanceOf, Pri
 from browser_use.browser.profile import BrowserProfile
 from browser_use.browser.views import (
 	BrowserError,
-	BrowserStateSummary,
+	BrowserState,
 	TabInfo,
 	URLNotAllowedError,
 )
@@ -33,9 +33,6 @@ from browser_use.dom.clickable_element_processor.service import ClickableElement
 from browser_use.dom.service import DomService
 from browser_use.dom.views import DOMElementNode, SelectorMap
 from browser_use.utils import match_url_with_domain_pattern, merge_dicts, time_execution_async, time_execution_sync
-
-# Check if running in Docker
-IN_DOCKER = os.environ.get('IN_DOCKER', 'false').lower()[0] in 'ty1'
 
 logger = logging.getLogger('browser_use.browser.session')
 
@@ -200,7 +197,7 @@ class BrowserSession(BaseModel):
 		exclude=True,
 	)
 
-	_cached_browser_state_summary: BrowserStateSummary | None = PrivateAttr(default=None)
+	_cached_browser_state_summary: BrowserState | None = PrivateAttr(default=None)
 	_cached_clickable_element_hashes: CachedClickableElementHashes | None = PrivateAttr(default=None)
 	_start_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
@@ -1662,7 +1659,7 @@ class BrowserSession(BaseModel):
 		return structure
 
 	@time_execution_sync('--get_state_summary')  # This decorator might need to be updated to handle async
-	async def get_state_summary(self, cache_clickable_elements_hashes: bool) -> BrowserStateSummary:
+	async def get_state_summary(self, cache_clickable_elements_hashes: bool) -> BrowserState:
 		"""Get a summary of the current browser state
 
 		This method builds a BrowserStateSummary object that captures the current state
@@ -1706,7 +1703,7 @@ class BrowserSession(BaseModel):
 
 		return self._cached_browser_state_summary
 
-	async def _get_updated_state(self, focus_element: int = -1) -> BrowserStateSummary:
+	async def _get_updated_state(self, focus_element: int = -1) -> BrowserState:
 		"""Update and return state."""
 
 		page = await self.get_current_page()
@@ -1754,7 +1751,7 @@ class BrowserSession(BaseModel):
 			screenshot_b64 = await self.take_screenshot()
 			pixels_above, pixels_below = await self.get_scroll_info(page)
 
-			self.browser_state_summary = BrowserStateSummary(
+			self.browser_state_summary = BrowserState(
 				element_tree=content.element_tree,
 				selector_map=content.selector_map,
 				url=page.url,

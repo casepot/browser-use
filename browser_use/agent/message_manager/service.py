@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from browser_use.agent.message_manager.views import MessageMetadata
 from browser_use.agent.prompts import AgentMessagePrompt
 from browser_use.agent.views import ActionResult, AgentOutput, AgentStepInfo, MessageManagerState
-from browser_use.browser.views import BrowserStateSummary
+from browser_use.browser.views import BrowserState
 from browser_use.utils import time_execution_sync
 
 logger = logging.getLogger(__name__)
@@ -285,7 +285,7 @@ class MessageManager:
 	@time_execution_sync('--add_state_message')
 	def add_state_message(
 		self,
-		browser_state_summary: BrowserStateSummary,
+		browser_state_summary: BrowserState,
 		result: list[ActionResult] | None = None,
 		step_info: AgentStepInfo | None = None,
 		use_vision=True,

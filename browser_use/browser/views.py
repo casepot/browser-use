@@ -18,7 +18,7 @@ class TabInfo(BaseModel):
 
 
 @dataclass
-class BrowserStateSummary(DOMState):
+class BrowserState(DOMState):
 	"""The summary of the browser's current state designed for an LLM to process"""
 
 	# provided by DOMState:
