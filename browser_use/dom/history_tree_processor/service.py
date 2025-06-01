@@ -92,7 +92,8 @@ class HistoryTreeProcessor:
 
 	@staticmethod
 	def _attributes_hash(attributes: dict[str, str]) -> str:
-		attributes_string = ''.join(f'{key}={value}' for key, value in attributes.items())
+		# Sort items by key for consistent hash
+		attributes_string = ''.join(f'{key}={value}' for key, value in sorted(attributes.items()))
 		return hashlib.sha256(attributes_string.encode()).hexdigest()
 
 	@staticmethod
