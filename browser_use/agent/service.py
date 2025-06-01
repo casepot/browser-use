@@ -1241,7 +1241,7 @@ class Agent(Generic[Context]):
 						break # Abort *subsequent* actions
 
 				# If all checks passed and we are not breaking, sleep before the next action.
-				await asyncio.sleep(self.browser_context.config.wait_between_actions)
+				await asyncio.sleep(self.browser_context.browser_profile.wait_between_actions)
 
 			except asyncio.CancelledError:
 				# Gracefully handle task cancellation
